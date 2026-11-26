@@ -1,0 +1,71 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#101318">
+  <meta name="description" content="Live Studio - Your personal podcast soundboard.">
+  <title>Live Studio | Podcast Soundboard</title>
+  <link rel="stylesheet" href="./styles.css">
+  <link rel="manifest" href="./manifest.json">
+</head>
+
+<body>
+  <main class="studio">
+
+    <header class="studio-header">
+      <div>
+        <p class="eyebrow">YOUR PERSONAL BROADCAST CONSOLE</p>
+        <h1>🎙️ LIVE STUDIO</h1>
+        <p class="subtitle">Your show. Your sounds. Your control.</p>
+      </div>
+      <div class="live-indicator">
+        <span class="live-dot"></span>
+        STUDIO READY
+      </div>
+    </header>
+
+    <section class="toolbar">
+      <button id="add-pad">＋ New Sound Pad</button>
+      <button id="upload-audio">♫ Upload Sounds</button>
+      <button id="record-audio">● Record Voice</button>
+      <button id="stop-all" class="stop-button">■ STOP ALL</button>
+      <input id="audio-input" type="file" accept="audio/*" multiple hidden>
+    </section>
+
+    <section class="sound-library">
+      <div class="section-heading">
+        <div>
+          <h2>Sound Library</h2>
+          <p>Your collection of instant reactions and effects.</p>
+        </div>
+        <span id="pad-count">0 SOUNDS</span>
+      </div>
+
+      <div id="sound-pads" class="sound-grid"></div>
+    </section>
+
+    <section class="mixer">
+      <h2>🎚️ Master Mixer</h2>
+      <label for="master-volume">Master Volume</label>
+      <input
+        type="range"
+        id="master-volume"
+        min="0"
+        max="100"
+        value="80"
+      >
+      <span id="master-volume-value">80%</span>
+    </section>
+
+    <footer>
+      <p id="studio-status">Welcome to Live Studio. Ready when you are.</p>
+      <p>LIVE STUDIO © 2026</p>
+    </footer>
+
+  </main>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>
