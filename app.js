@@ -1,10 +1,13 @@
 
 const STORAGE_KEY = "live-studio-v1";
+const DB_NAME = "live-studio-audio";
+const DB_VERSION = 1;
+const AUDIO_STORE = "audioFiles";
 
 const defaultPads = [
   { name: "Applause", emoji: "👏", type: "applause", color: "#166534" },
   { name: "Laugh Track", emoji: "😂", type: "laugh", color: "#854d0e" },
-  { name: "Drum Roll", emoji https://prismprojekt.github.io/live-studio/: "🥁", type: "drum", color: "#9a3412" },
+  { name: "Drum Roll", emoji: "🥁", type: "drum", color: "#9a3412" },
   { name: "Ding", emoji: "🛎️", type: "ding", color: "#1d4ed8" },
   { name: "Air Horn", emoji: "🚨", type: "horn", color: "#991b1b" },
   { name: "Crickets", emoji: "🦗", type: "crickets", color: "#065f46" },
@@ -14,7 +17,9 @@ const defaultPads = [
 
 let pads = [];
 let audioContext = null;
+let masterGain = null;
 let activeAudio = new Set();
+let activeSources = new Set();
 let masterVolume = 0.8;
 let recorder = null;
 let recordingStream = null;
@@ -24,35 +29,123 @@ const padContainer = document.getElementById("sound-pads");
 const statusDisplay = document.getElementById("studio-status");
 const padCount = document.getElementById("pad-count");
 const fileInput = document.getElementById("audio-input");
+const masterSlider = document.getElementById("master-volume");
+const masterValue = document.getElementById("master-volume-value");
 
 function status(message) {
   statusDisplay.textContent = message;
 }
 
-function getAudioContext() {
-  if (!audioContext) {
-    audioContext = new (
-      window.AudioContext || window.webkitAudioContext
-    )();
-  }
+// ----------------------------------
+// AUDIO DATABASE
+// ----------------------------------
 
-  if (audioContext.state === "suspended") {
-    audioContext.resume();
-  }
+function openAudioDatabase() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
 
-  return audioContext;
+    request.onupgradeneeded = () => {
+      const db = request.result;
+
+      if (!db.objectStoreNames.contains(AUDIO_STORE)) {
+        db.createObjectStore(AUDIO_STORE, { keyPath: "id" });
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
 }
+
+async function storeAudio(id, blob) {
+  const db = await openAudioDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(AUDIO_STORE, "readwrite");
+
+    transaction.objectStore(AUDIO_STORE).put({
+      id,
+      blob,
+      savedAt: Date.now()
+    });
+
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error);
+    };
+  });
+}
+
+async function getStoredAudio(id) {
+  const db = await openAudioDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(AUDIO_STORE, "readonly");
+    const request = transaction.objectStore(AUDIO_STORE).get(id);
+
+    request.onsuccess = () => {
+      const result = request.result;
+      db.close();
+      resolve(result ? result.blob : null);
+    };
+
+    request.onerror = () => {
+      db.close();
+      reject(request.error);
+    };
+  });
+}
+
+async function deleteStoredAudio(id) {
+  if (!id) return;
+
+  const db = await openAudioDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(AUDIO_STORE, "readwrite");
+
+    transaction.objectStore(AUDIO_STORE).delete(id);
+
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error);
+    };
+  });
+}
+
+function makeId() {
+  if (crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+
+  return "audio-" + Date.now() + "-" + Math.random();
+}
+
+// ----------------------------------
+// PAD SETTINGS
+// ----------------------------------
 
 function savePads() {
   try {
-    const data = pads.map(pad => ({
-      ...pad,
-      audio: null
-    }));
+    const settings = pads.map(pad => {
+      const savedPad = { ...pad };
+      delete savedPad.audio;
+      return savedPad;
+    });
 
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
   } catch (error) {
-    status("Storage unavailable. Your current session is still active.");
+    status("Could not save pad settings.");
   }
 }
 
@@ -61,7 +154,10 @@ function loadPads() {
     const saved = localStorage.getItem(STORAGE_KEY);
 
     if (saved) {
-      pads = JSON.parse(saved);
+      pads = JSON.parse(saved).map(pad => ({
+        ...pad,
+        volume: pad.volume ?? 1
+      }));
     } else {
       pads = defaultPads.map(pad => ({
         ...pad,
@@ -76,7 +172,68 @@ function loadPads() {
   }
 }
 
-function makeTone(frequency, start, duration, volume, wave = "sine", endFrequency = null) {
+// ----------------------------------
+// AUDIO ENGINE
+// ----------------------------------
+
+function getAudioContext() {
+  if (!audioContext) {
+    const AudioContextClass =
+      window.AudioContext || window.webkitAudioContext;
+
+    audioContext = new AudioContextClass();
+    masterGain = audioContext.createGain();
+
+    masterGain.gain.value = masterVolume;
+    masterGain.connect(audioContext.destination);
+  }
+
+  if (audioContext.state === "suspended") {
+    audioContext.resume();
+  }
+
+  return audioContext;
+}
+
+function setMasterVolume(value) {
+  masterVolume = Math.max(0, Math.min(1, value));
+
+  if (masterGain && audioContext) {
+    masterGain.gain.setTargetAtTime(
+      masterVolume,
+      audioContext.currentTime,
+      0.01
+    );
+  }
+
+  activeAudio.forEach(audio => {
+    audio.volume = Math.max(
+      0,
+      Math.min(1, audio.padVolume * masterVolume)
+    );
+  });
+
+  if (masterValue) {
+    masterValue.textContent = Math.round(masterVolume * 100) + "%";
+  }
+}
+
+function trackSource(source) {
+  activeSources.add(source);
+
+  source.onended = () => {
+    activeSources.delete(source);
+  };
+}
+
+function makeTone(
+  frequency,
+  start,
+  duration,
+  volume,
+  wave = "sine",
+  endFrequency = null
+) {
   const ctx = getAudioContext();
   const oscillator = ctx.createOscillator();
   const gain = ctx.createGain();
@@ -93,7 +250,7 @@ function makeTone(frequency, start, duration, volume, wave = "sine", endFrequenc
 
   gain.gain.setValueAtTime(0.001, start);
   gain.gain.exponentialRampToValueAtTime(
-    Math.max(0.002, volume * masterVolume),
+    Math.max(0.002, volume),
     start + 0.02
   );
   gain.gain.exponentialRampToValueAtTime(
@@ -102,7 +259,9 @@ function makeTone(frequency, start, duration, volume, wave = "sine", endFrequenc
   );
 
   oscillator.connect(gain);
-  gain.connect(ctx.destination);
+  gain.connect(masterGain);
+
+  trackSource(oscillator);
 
   oscillator.start(start);
   oscillator.stop(start + duration + 0.03);
@@ -127,10 +286,12 @@ function makeNoise(start, duration, volume) {
   const gain = ctx.createGain();
 
   source.buffer = buffer;
-  gain.gain.value = volume * masterVolume;
+  gain.gain.value = volume;
 
   source.connect(gain);
-  gain.connect(ctx.destination);
+  gain.connect(masterGain);
+
+  trackSource(source);
 
   source.start(start);
   source.stop(start + duration);
@@ -179,7 +340,14 @@ function playEffect(type, volume) {
 
     case "laugh":
       for (let i = 0; i < 8; i++) {
-        makeTone(350 + (i % 3) * 100, t + i * 0.18, 0.12, 0.18 * v, "triangle", 200);
+        makeTone(
+          350 + (i % 3) * 100,
+          t + i * 0.18,
+          0.12,
+          0.18 * v,
+          "triangle",
+          200
+        );
       }
       break;
 
@@ -191,24 +359,64 @@ function playEffect(type, volume) {
   }
 }
 
-function playPad(index) {
+// ----------------------------------
+// PLAYBACK
+// ----------------------------------
+
+async function playPad(index) {
   const pad = pads[index];
 
   if (!pad) return;
 
-  if (pad.audio) {
-    const audio = new Audio(pad.audio);
-    audio.volume = pad.volume ?? 1;
-    audio.play();
+  try {
+    if (pad.audioId) {
+      const blob = await getStoredAudio(pad.audioId);
 
-    activeAudio.add(audio);
+      if (!blob) {
+        status("Audio file missing: " + pad.name);
+        return;
+      }
 
-    audio.onended = () => activeAudio.delete(audio);
-  } else {
-    playEffect(pad.type, pad.volume ?? 1);
+      const audioURL = URL.createObjectURL(blob);
+      const audio = new Audio(audioURL);
+
+      audio.padVolume = pad.volume ?? 1;
+      audio.volume = audio.padVolume * masterVolume;
+
+      activeAudio.add(audio);
+
+      audio.onended = () => {
+        activeAudio.delete(audio);
+        URL.revokeObjectURL(audioURL);
+      };
+
+      audio.onerror = () => {
+        activeAudio.delete(audio);
+        URL.revokeObjectURL(audioURL);
+        status("Could not play: " + pad.name);
+      };
+
+      await audio.play();
+    } else if (pad.audio) {
+      // Support an older saved audio Data URL if one exists.
+      const audio = new Audio(pad.audio);
+
+      audio.padVolume = pad.volume ?? 1;
+      audio.volume = audio.padVolume * masterVolume;
+
+      activeAudio.add(audio);
+
+      audio.onended = () => activeAudio.delete(audio);
+
+      await audio.play();
+    } else {
+      playEffect(pad.type, pad.volume ?? 1);
+    }
+
+    status("Playing: " + pad.name);
+  } catch (error) {
+    status("Playback failed. Try clicking the pad again.");
   }
-
-  status("Playing: " + pad.name);
 }
 
 function stopAll() {
@@ -219,13 +427,28 @@ function stopAll() {
 
   activeAudio.clear();
 
+  activeSources.forEach(source => {
+    try {
+      source.stop();
+    } catch (error) {
+      // Source may have already finished.
+    }
+  });
+
+  activeSources.clear();
+
   if (audioContext) {
     audioContext.close();
     audioContext = null;
+    masterGain = null;
   }
 
   status("All playback stopped.");
 }
+
+// ----------------------------------
+// PAD DISPLAY
+// ----------------------------------
 
 function renderPads() {
   padContainer.innerHTML = "";
@@ -237,6 +460,7 @@ function renderPads() {
 
     const playButton = document.createElement("button");
     playButton.className = "pad-play";
+
     playButton.innerHTML = `
       <span class="pad-emoji">${pad.emoji || "🎧"}</span>
       <strong>${escapeHTML(pad.name)}</strong>
@@ -269,7 +493,19 @@ function renderPads() {
     const remove = document.createElement("button");
     remove.textContent = "×";
     remove.title = "Delete pad";
-    remove.onclick = () => {
+    remove.onclick = async () => {
+      const removedPad = pads[index];
+
+      stopAll();
+
+      if (removedPad.audioId) {
+        try {
+          await deleteStoredAudio(removedPad.audioId);
+        } catch (error) {
+          status("Could not delete the stored audio file.");
+        }
+      }
+
       pads.splice(index, 1);
       savePads();
       renderPads();
@@ -327,28 +563,43 @@ function addPad() {
   status("New sound pad created.");
 }
 
-function uploadAudio(files) {
-  Array.from(files).forEach(file => {
-    const reader = new FileReader();
+// ----------------------------------
+// UPLOAD AUDIO
+// ----------------------------------
 
-    reader.onload = () => {
+async function uploadAudio(files) {
+  for (const file of Array.from(files)) {
+    if (!file.type.startsWith("audio/")) {
+      status("Please choose an audio file.");
+      continue;
+    }
+
+    const audioId = makeId();
+
+    try {
+      await storeAudio(audioId, file);
+
       pads.push({
         name: file.name,
         emoji: "🎧",
         color: "#334155",
         volume: 1,
         type: null,
-        audio: reader.result
+        audioId
       });
 
       savePads();
       renderPads();
-      status("Uploaded: " + file.name);
-    };
-
-    reader.readAsDataURL(file);
-  });
+      status("Uploaded and saved: " + file.name);
+    } catch (error) {
+      status("Could not save " + file.name + ". Check browser storage.");
+    }
+  }
 }
+
+// ----------------------------------
+// VOICE RECORDING
+// ----------------------------------
 
 async function toggleRecording() {
   if (recorder && recorder.state === "recording") {
@@ -357,6 +608,11 @@ async function toggleRecording() {
   }
 
   try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      status("Microphone recording is not supported in this browser.");
+      return;
+    }
+
     recordingStream = await navigator.mediaDevices.getUserMedia({
       audio: true
     });
@@ -371,31 +627,37 @@ async function toggleRecording() {
       }
     };
 
-    recorder.onstop = () => {
+    recorder.onstop = async () => {
       const blob = new Blob(recordingChunks, {
-        type: recorder.mimeType
+        type: recorder.mimeType || "audio/webm"
       });
 
-      const reader = new FileReader();
+      try {
+        const audioId = makeId();
 
-      reader.onload = () => {
+        await storeAudio(audioId, blob);
+
         pads.push({
           name: "My Voice Recording",
           emoji: "🎙️",
           color: "#7f1d1d",
           volume: 1,
           type: null,
-          audio: reader.result
+          audioId
         });
 
         savePads();
         renderPads();
+
         status("Voice recording saved as a new pad.");
-      };
+      } catch (error) {
+        status("Recording finished, but could not be saved.");
+      }
 
-      reader.readAsDataURL(blob);
-
-      recordingStream.getTracks().forEach(track => track.stop());
+      if (recordingStream) {
+        recordingStream.getTracks().forEach(track => track.stop());
+        recordingStream = null;
+      }
 
       document.getElementById("record-audio").textContent = "● Record Voice";
     };
@@ -404,11 +666,14 @@ async function toggleRecording() {
 
     document.getElementById("record-audio").textContent = "■ Stop Recording";
     status("Recording. Press Stop Recording when finished.");
-
   } catch (error) {
     status("Microphone unavailable. Check browser permissions.");
   }
 }
+
+// ----------------------------------
+// BUTTONS AND STARTUP
+// ----------------------------------
 
 document.getElementById("add-pad").addEventListener("click", addPad);
 
@@ -428,27 +693,36 @@ document.getElementById("record-audio").addEventListener(
 
 document.getElementById("stop-all").addEventListener("click", stopAll);
 
-document.getElementById("master-volume").addEventListener("input", event => {
-  masterVolume = Number(event.target.value) / 100;
-
-  document.getElementById("master-volume-value").textContent =
-    event.target.value + "%";
+masterSlider.addEventListener("input", event => {
+  setMasterVolume(Number(event.target.value) / 100);
 });
 
-loadPads();
-renderPads();
+async function startStudio() {
+  loadPads();
 
-// Register the service worker for offline app support.
-if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker
-      .register("./service-worker.js")
-      .then(() => {
-        status("Live Studio ready. Offline support enabled.");
-      })
-      .catch((error) => {
-        console.error("Service worker registration failed:", error);
-        status("Live Studio ready. Offline support unavailable.");
-      });
-  });
+  if (masterSlider) {
+    masterSlider.value = 80;
+  }
+
+  setMasterVolume(0.8);
+  renderPads();
+
+  try {
+    await openAudioDatabase();
+    status("Live Studio ready. Audio storage is available.");
+  } catch (error) {
+    status("Live Studio ready, but audio storage is unavailable.");
+  }
+
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker
+        .register("./service-worker.js")
+        .catch(error => {
+          console.error("Service worker registration failed:", error);
+        });
+    });
+  }
 }
+
+startStudio();
