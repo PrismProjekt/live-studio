@@ -437,3 +437,18 @@ document.getElementById("master-volume").addEventListener("input", event => {
 
 loadPads();
 renderPads();
+
+// Register the service worker for offline app support.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker
+      .register("./service-worker.js")
+      .then(() => {
+        status("Live Studio ready. Offline support enabled.");
+      })
+      .catch((error) => {
+        console.error("Service worker registration failed:", error);
+        status("Live Studio ready. Offline support unavailable.");
+      });
+  });
+}
