@@ -4,7 +4,7 @@ const STORAGE_KEY = "live-studio-v1";
 const defaultPads = [
   { name: "Applause", emoji: "👏", type: "applause", color: "#166534" },
   { name: "Laugh Track", emoji: "😂", type: "laugh", color: "#854d0e" },
-  { name: "Drum Roll", emoji: "🥁", type: "drum", color: "#9a3412" },
+  { name: "Drum Roll", emoji https://prismprojekt.github.io/live-studio/: "🥁", type: "drum", color: "#9a3412" },
   { name: "Ding", emoji: "🛎️", type: "ding", color: "#1d4ed8" },
   { name: "Air Horn", emoji: "🚨", type: "horn", color: "#991b1b" },
   { name: "Crickets", emoji: "🦗", type: "crickets", color: "#065f46" },
