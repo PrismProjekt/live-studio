@@ -1,0 +1,13 @@
+
+{
+  "name": "Live Studio Podcast Soundboard",
+  "short_name": "Live Studio",
+  "description": "Your personal podcast soundboard and audio control deck.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#101318",
+  "theme_color": "#101318",
+  "icons": []
+}
